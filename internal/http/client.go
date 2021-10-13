@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/textproto"
 	"net/url"
 	"strconv"
@@ -30,6 +31,12 @@ import (
 )
 
 // Client is a component able to send and receive Benthos messages over HTTP.
+
+type ClientPart struct {
+	contentDisposition *field.Expression
+	contentType        string
+	data               *field.Expression
+}
 type Client struct {
 	client *http.Client
 
@@ -37,9 +44,10 @@ type Client struct {
 	dropOn    map[int]struct{}
 	successOn map[int]struct{}
 
-	url     *field.Expression
-	headers map[string]*field.Expression
-	host    *field.Expression
+	url       *field.Expression
+	headers   map[string]*field.Expression
+	multipart []ClientPart
+	host      *field.Expression
 
 	conf          client.Config
 	retryThrottle *throttle.Type
@@ -87,7 +95,6 @@ func NewClient(conf client.Config, opts ...func(*Client)) (*Client, error) {
 	}
 	h.oauthClientCtx, h.oauthClientCancel = context.WithCancel(context.Background())
 	h.client = conf.OAuth2.Client(h.oauthClientCtx)
-
 	if tout := conf.Timeout; len(tout) > 0 {
 		var err error
 		if h.client.Timeout, err = time.ParseDuration(tout); err != nil {
@@ -140,7 +147,22 @@ func NewClient(conf client.Config, opts ...func(*Client)) (*Client, error) {
 	for _, c := range conf.SuccessfulOn {
 		h.successOn[c] = struct{}{}
 	}
-
+	for _, v := range conf.Multipart {
+		data, err := bloblang.NewField(v.Data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse data expression: %v", err)
+		}
+		ContentDisposition, err := bloblang.NewField(v.ContentDisposition)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse ContentDisposition: %v", err)
+		}
+		c := ClientPart{
+			contentDisposition: ContentDisposition,
+			contentType:        v.ContentType,
+			data:               data,
+		}
+		h.multipart = append(h.multipart, c)
+	}
 	for k, v := range conf.Headers {
 		if strings.EqualFold(k, "host") {
 			if h.host, err = bloblang.NewField(v); err != nil {
@@ -152,7 +174,6 @@ func NewClient(conf client.Config, opts ...func(*Client)) (*Client, error) {
 			}
 		}
 	}
-
 	for _, opt := range opts {
 		opt(&h)
 	}
@@ -287,8 +308,29 @@ func (h *Client) waitForAccess(ctx context.Context) bool {
 func (h *Client) CreateRequest(sendMsg, refMsg types.Message) (req *http.Request, err error) {
 	var overrideContentType string
 	var body io.Reader
+	if len(h.multipart) > 0 {
+		buf := &bytes.Buffer{}
+		writer := multipart.NewWriter(buf)
+		for i, v := range h.multipart {
 
-	if sendMsg != nil && sendMsg.Len() == 1 {
+			contentType := v.contentType
+			contentDisposition := v.contentDisposition
+			var part io.Writer
+			mh := make(textproto.MIMEHeader)
+			mh.Set("Content-Type", contentType)
+			mh.Set("Content-Disposition", contentDisposition.String(0, refMsg))
+
+			if part, err = writer.CreatePart(mh); err != nil {
+				return
+			}
+			if _, err = io.Copy(part, bytes.NewReader([]byte(h.multipart[i].data.String(0, refMsg)))); err != nil {
+				return
+			}
+		}
+		writer.Close()
+		overrideContentType = writer.FormDataContentType()
+		body = buf
+	} else if sendMsg != nil && sendMsg.Len() == 1 {
 		if msgBytes := sendMsg.Get(0).Get(); len(msgBytes) > 0 {
 			body = bytes.NewBuffer(msgBytes)
 		}
@@ -298,6 +340,7 @@ func (h *Client) CreateRequest(sendMsg, refMsg types.Message) (req *http.Request
 
 		for i := 0; i < sendMsg.Len(); i++ {
 			contentType := "application/octet-stream"
+
 			if v, exists := h.headers["Content-Type"]; exists {
 				contentType = v.String(i, refMsg)
 			}
@@ -314,7 +357,6 @@ func (h *Client) CreateRequest(sendMsg, refMsg types.Message) (req *http.Request
 
 		writer.Close()
 		overrideContentType = writer.FormDataContentType()
-
 		body = buf
 	}
 
@@ -490,6 +532,10 @@ func (h *Client) SendToResponse(ctx context.Context, sendMsg, refMsg types.Messa
 			err = fmt.Errorf("%s: %w", req.URL, err)
 		}
 	}()
+	fmt.Println("dumping request**************")
+	dump, _ := httputil.DumpRequest(req, true)
+	fmt.Println(string(dump))
+	fmt.Println("**************")
 
 	startedAt := time.Now()
 
@@ -501,6 +547,7 @@ func (h *Client) SendToResponse(ctx context.Context, sendMsg, refMsg types.Messa
 	numRetries := h.conf.NumRetries
 
 	res, err = h.client.Do(req.WithContext(ctx))
+	fmt.Println("response", res)
 	if err != nil {
 		if err, ok := err.(net.Error); ok && err.Timeout() {
 			h.mErrReqTimeout.Incr(1)

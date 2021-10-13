@@ -50,6 +50,13 @@ type Config struct {
 	ProxyURL            string            `json:"proxy_url" yaml:"proxy_url"`
 	auth.Config         `json:",inline" yaml:",inline"`
 	OAuth2              auth.OAuth2Config `json:"oauth2" yaml:"oauth2"`
+	Multipart           []Part            `json:"multipart" yaml:"multipart"`
+}
+
+type Part struct {
+	ContentDisposition string `json:"contentDisposition" yaml:"contentDisposition"`
+	ContentType        string `json:"contentType" yaml:"contentType"`
+	Data               string `json:"data" yaml:"data"`
 }
 
 // NewConfig creates a new Config with default values.
