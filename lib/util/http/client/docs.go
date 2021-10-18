@@ -16,6 +16,9 @@ func FieldSpecs() docs.FieldSpecs {
 		}).IsInterpolated().Map().HasDefault(map[string]interface{}{
 			"Content-Type": "application/octet-stream",
 		}),
+		docs.FieldAdvanced(
+			"multipart", "A array of parts to add to the request.",
+		).Array().HasType(docs.FieldTypeObject).HasDefault([]Part{}),
 	}
 	httpSpecs = append(httpSpecs, auth.FieldSpecsExpanded()...)
 	httpSpecs = append(httpSpecs, tls.FieldSpec(),
